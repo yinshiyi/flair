@@ -12,6 +12,89 @@ from flair.bed_to_gtf import bed_to_gtf
 from flair.flair_transcriptome import revcomp
 from statistics import mode
 
+def parse_gtf_attributes(attributes):
+    parsed = {}
+    for attribute in attributes.rstrip(';').split(';'):
+        attribute = attribute.strip()
+        if not attribute:
+            continue
+        key, separator, value = attribute.partition(' ')
+        if not separator:
+            key, separator, value = attribute.partition('=')
+        if separator:
+            parsed[key] = value.strip().strip('"')
+    return parsed
+
+def load_transcript_gene_map(gtf_path):
+    transcript_to_gene = {}
+    if not gtf_path:
+        return transcript_to_gene
+    with open(gtf_path) as gtf:
+        for line in gtf:
+            if line.startswith('#'):
+                continue
+            fields = line.rstrip('\n').split('\t')
+            if len(fields) < 9:
+                continue
+            attributes = parse_gtf_attributes(fields[8])
+            transcript_id = attributes.get('transcript_id')
+            gene_id = attributes.get('gene_id')
+            if transcript_id and gene_id:
+                transcript_to_gene.setdefault(transcript_id.split('.')[0], gene_id)
+    return transcript_to_gene
+
+def isoform_transcript_id(isoname):
+    return isoname.split('_', 1)[0].split('.')[0]
+
+def legacy_gene_name(isoforms):
+    outgene = None
+    for isoform in isoforms:
+        gene_name = isoform[3].split('_')[-1]
+        if gene_name[:4] == 'ENSG':
+            outgene = gene_name
+    if not outgene:
+        outgene = mode([isoform[3].split('_')[-1] for isoform in isoforms])
+    return outgene
+
+def legacy_isoform_name(isoforms, isocount, ichainendscount):
+    for isoform in isoforms:
+        if isoform[3][:4] == 'ENST' and len(isoform[3].split('ENSG')[0]) < 25 and len(isoform[3].split('ENSG')) == 2:
+            return str(isocount) + '-' + str(ichainendscount) + '_' + isoform[3]
+    outgene = None
+    for isoform in isoforms:
+        if len(isoform[3].split('ENSG')) > 1:
+            outgene = 'ENSG' + isoform[3].split('ENSG')[-1]
+        if not outgene or outgene[:4] != 'ENSG':
+            if len(isoform[3].split('chr')) > 1:
+                outgene = 'chr' + isoform[3].split('chr')[-1]
+    if not outgene:
+        outgene = legacy_gene_name(isoforms)
+    return 'flairiso' + str(isocount) + '-' + str(ichainendscount) + '_' + outgene
+
+def select_isoform_name(isoforms, isocount, ichainendscount, transcript_to_gene,
+                        annotation_provided):
+    if not annotation_provided:
+        return legacy_isoform_name(isoforms, isocount, ichainendscount)
+    for isoform in isoforms:
+        if isoform_transcript_id(isoform[3]) in transcript_to_gene:
+            return str(isocount) + '-' + str(ichainendscount) + '_' + isoform[3]
+    outgene = next((transcript_to_gene[isoform_transcript_id(isoform[3])]
+                    for isoform in isoforms
+                    if isoform_transcript_id(isoform[3]) in transcript_to_gene), None)
+    if not outgene:
+        outgene = mode([isoform[3].split('_')[-1] for isoform in isoforms])
+    return 'flairiso' + str(isocount) + '-' + str(ichainendscount) + '_' + outgene
+
+def select_low_expression_name(isoforms, transcript_to_gene, annotation_provided):
+    if not annotation_provided:
+        return 'lowexpiso_' + legacy_gene_name(isoforms)
+    outgene = next((transcript_to_gene[isoform_transcript_id(isoform[3])]
+                    for isoform in isoforms
+                    if isoform_transcript_id(isoform[3]) in transcript_to_gene), None)
+    if not outgene:
+        outgene = mode([isoform[3].split('_')[-1] for isoform in isoforms])
+    return 'lowexpiso_' + outgene
+
 def bedReadToIntronChain(line): # line is a list of strings from a tab separated line
     dir, start, esizes, estarts = line[5], int(line[1]), [int(x) for x in line[10].rstrip(',').split(',')], [int(x) for x in line[11].rstrip(',').split(',')]
     introns = []
@@ -79,12 +162,16 @@ def combine():
                         help='whether to include single exon isoforms. Default: dont include')
     parser.add_argument('-f', '--filter', default='usageandlongest',
                         help='type of filtering. Options: usageandlongest(default), usageonly, none, or a number for the total count of reads required to call an isoform')
+    parser.add_argument('-g', '--gtf', '--annotation', dest='gtf',
+                        help='optional GTF used to map transcript IDs to gene IDs')
 
     args = parser.parse_args()
     manifest = args.manifest
     outprefix = args.output_prefix
     endwindow = int(args.endwindow)
     minpercentusage = int(args.minpercentusage) / 100.
+    transcript_to_gene = load_transcript_gene_map(args.gtf)
+    annotation_provided = bool(args.gtf)
 
     bedfiles, mapfiles, samples, fafiles = [], [], [], []
     for line in open(manifest):
@@ -236,24 +323,8 @@ def combine():
                         outgene = mode([x[3].split('_')[-1] for x in theseisos])
                         outname = 'flairiso' + str(isocount) + '-' + str(ichainendscount) + '_' + outgene
                     else:
-                        outname = None
-                        # this is for prioritizing annotated transcript names above unannotated transcript names
-                        # FIXME breaks if annotation is not gencode/ensembl
-                        for i in theseisos:
-                            if i[3][:4] == 'ENST' and len(i[3].split('ENSG')[0]) < 25 and len(i[3].split('ENSG')) == 2:
-                                outname = str(isocount) + '-' + str(ichainendscount) + '_' + i[3]
-                                break
-                        if not outname:
-                            outgene = None
-                            for i in theseisos:
-                                if len(i[3].split('ENSG')) > 1:
-                                    outgene = 'ENSG' + i[3].split('ENSG')[-1]
-                                if not outgene or outgene[:4] != 'ENSG':
-                                    if len(i[3].split('chr')) > 1:
-                                        outgene = 'chr' + i[3].split('chr')[-1]
-                            if not outgene:
-                                outgene = mode([x[3].split('_')[-1] for x in theseisos])
-                            outname = 'flairiso' + str(isocount) + '-' + str(ichainendscount) + '_' + outgene
+                        outname = select_isoform_name(theseisos, isocount, ichainendscount,
+                                                      transcript_to_gene, annotation_provided)
 
 
                     # output bed line
@@ -295,13 +366,8 @@ def combine():
                         isoseq = sampletoseq[sample][isoname]
                         outfa.write('>' + outname + '\n' + isoseq + '\n')
                 else:
-                    outgene = None
-                    for i in theseisos:
-                        if i[3].split('_')[-1][:4] == 'ENSG':
-                            outgene = i[3].split('_')[-1]
-                    if not outgene:
-                        outgene = mode([x[3].split('_')[-1] for x in theseisos])
-                    outname = 'lowexpiso_' + outgene
+                    outname = select_low_expression_name(theseisos, transcript_to_gene,
+                                                         annotation_provided)
 
                 if outname not in isomap:
                     isomap[outname] = []
@@ -314,13 +380,8 @@ def combine():
                 ichainendscount += 1
             isocount += 1
         else:
-            outgene = None
-            for i in theseisos:
-                if i[3].split('_')[-1][:4] == 'ENSG':
-                    outgene = i[3].split('_')[-1]
-            if not outgene:
-                outgene = mode([x[3].split('_')[-1] for x in theseisos])
-            outname = 'lowexpiso_' + outgene
+            outname = select_low_expression_name(theseisos, transcript_to_gene,
+                                                 annotation_provided)
             if outname not in isomap:
                 isomap[outname] = []
             for info in collapsedIsos:
