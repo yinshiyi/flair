@@ -21,13 +21,13 @@ jobs:
           echo "BRANCH=$TARGET" >> $GITHUB_OUTPUT
 
       - name: Reject unsupported target branch
-        if: steps.target-branch.outputs.BRANCH != 'dev' && steps.target-branch.outputs.BRANCH != 'master'
+        if: steps.target-branch.outputs.BRANCH != 'dev_sy' && steps.target-branch.outputs.BRANCH != 'master'
         run: |
           echo "::error::Unsupported target branch; expected 'dev' or 'master'."
           exit 1
 
       - name: Setup Conda / Mamba Environment (dev)
-        if: steps.target-branch.outputs.BRANCH == 'dev'
+        if: steps.target-branch.outputs.BRANCH == 'dev_sy'
         uses: mamba-org/setup-micromamba@v1
         with:
           environment-file: misc/flair_dev_conda_env.yaml
@@ -43,7 +43,7 @@ jobs:
           cache-environment: true
 
       - name: Install local package with dev extras
-        if: steps.target-branch.outputs.BRANCH == 'dev'
+        if: steps.target-branch.outputs.BRANCH == 'dev_sy'
         shell: bash -el {0}
         run: pip install -e ".[dev]"
 
